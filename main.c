@@ -237,7 +237,74 @@ void RR (int n_process, struct process *processes) {
 
 
 void SJF (int n_process, struct process *processes) {
-    
+    /** Current implementation is O(N) finding the smallest element in a linked list.
+     *  Can be improved by using heap (priority_queue).
+     */
+
+    int pool_entry = -1;
+    int next[n_process]; // next[last_thing] = -1
+    int next_entering_job = 0;
+    int current_job = -1;
+
+    for (int t = 0, finish_child_count = 0; finish_child_count < n_process; ++t) {
+        while (next_entering_job != n_process && processes[next_entering_job].ready <= t) {
+            // insert next_entering_job into pool
+            if (pool_entry == -1) next[(pool_entry = next_entering_job)] = -1;
+            else {
+                next[next_entering_job] = pool_entry;
+                pool_entry = next_entering_job;
+            }
+
+            pid_t pid = (processes[next_entering_job].pid = fork());
+            if (pid < 0) {
+                perror ("fork error\n");
+                exit (EXIT_FAILURE);
+            }
+            else if (pid == 0) {
+                // child
+                pid = (processes[next_entering_job].pid = getpid());
+                use_cpu (pid, CPU_CHILD);
+                set_priority (pid, PRIORITY_LOW);
+                run_child (&(processes[next_entering_job]));
+            }
+            // parent
+            // printf ("insert %d\n", next_entering_job);
+            ++next_entering_job;
+        }
+
+        // if no job is running
+        if (current_job == -1) {
+            // if no job can run
+            if (pool_entry == -1) {
+                run_unit_time ();
+                continue;
+            }
+            // find next job
+            for (int current = pool_entry, min_exect = MAX_EXECTIME; current != -1; current = next[current])
+                if (processes[current].exect <= min_exect) min_exect = processes[(current_job = current)].exect;
+            // remove next job from pool
+            if (current_job == pool_entry) pool_entry = next[current_job];
+            else {
+                for (int current = pool_entry; current != next[current_job]; current = next[current])
+                    if (next[current] == current_job) next[current] = next[current_job];
+            }
+            // run next job
+            // printf ("run %d\n", processes[current_job].pid);
+            set_priority (processes[current_job].pid, PRIORITY_HIGH);
+        }
+
+        run_unit_time ();
+        --processes[current_job].remain;
+
+        // finish running
+        if (processes[current_job].remain == 0) {
+            static int status;
+            waitpid (processes[current_job].pid, &status, 0);
+            // printf ("child %d finished.\n", processes[current_job].pid);
+            current_job = -1;
+            ++finish_child_count;
+        }
+    }
 }
 
 
