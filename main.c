@@ -7,14 +7,16 @@
 #include <sched.h>
 
 #define MAX_N_PROCESS 5000
+#define MAX_EXECTIME 10000000
 #define CPU_PARENT 0
 #define CPU_CHILD 1
 #define PRIORITY_HIGH 99
-#define PRIORITY_LOW 0
+#define PRIORITY_LOW 1
+#define RR_QUANTUM 500
 
 struct process {
     char name[40];
-    int ready, exect; // exectime
+    int ready, exect, remain; // exectime
     pid_t pid;
 };
 
@@ -44,6 +46,7 @@ int main() {
     for (int i = 0; i < n_process; ++i) {
         scanf ("%s%d%d", processes[i].name, &processes[i].ready, &processes[i].exect);
         processes[i].pid = 0;
+        processes[i].remain = processes[i].exect;
     }
     qsort (processes, n_process, sizeof (struct process), compar);
 
@@ -81,8 +84,7 @@ void use_cpu (pid_t pid, int cpu_id) {
 void set_priority (pid_t pid, int priority) {
     struct sched_param param;
 	param.sched_priority = priority;
-    int policy = (priority == PRIORITY_LOW) ? SCHED_IDLE : SCHED_FIFO;
-    if (sched_setscheduler (pid, policy, &param) != 0) {
+    if (sched_setscheduler (pid, SCHED_FIFO, &param) != 0) {
         perror ("sched_setscheduler error\n");
         exit (EXIT_FAILURE);
     }
@@ -149,7 +151,7 @@ void FIFO (int n_process, struct process *processes) {
         if (current_running_count == processes[que_front].exect) {
             static int status;
             waitpid (processes[que_front].pid, &status, 0);
-            printf ("child %d finished.\n", processes[que_front].pid);
+            // printf ("child %d finished.\n", processes[que_front].pid);
             current_running_count = 0;
             ++que_front;
             ++finish_child_count;
@@ -159,12 +161,83 @@ void FIFO (int n_process, struct process *processes) {
 
 
 void RR (int n_process, struct process *processes) {
+    int list_entry = -1;
+    int next[n_process], prev[n_process];
+    int next_entering_job = 0;
+    int current_running_count = 0;
 
+    for (int t = 0, finish_child_count = 0; finish_child_count < n_process; ++t) {
+        while (next_entering_job != n_process && processes[next_entering_job].ready <= t) {
+            // insert next_entering_job into list
+            if (list_entry == -1) list_entry = next[next_entering_job] = prev[next_entering_job] = next_entering_job;
+            else {
+                int _n = list_entry, _p = prev[list_entry];
+                prev[_n] = next[_p] = next_entering_job;
+                next[next_entering_job] = _n;
+                prev[next_entering_job] = _p;
+            }
+
+            pid_t pid = (processes[next_entering_job].pid = fork());
+            if (pid < 0) {
+                perror ("fork error\n");
+                exit (EXIT_FAILURE);
+            }
+            else if (pid == 0) {
+                // child
+                pid = (processes[next_entering_job].pid = getpid());
+                use_cpu (pid, CPU_CHILD);
+                set_priority (pid, PRIORITY_LOW);
+                run_child (&(processes[next_entering_job]));
+            }
+            // parent
+            // printf ("insert %d\n", next_entering_job);
+            ++next_entering_job;
+        }
+
+        // if no job is running
+        if (current_running_count == 0) {
+            // if no job can run
+            if (list_entry == -1) {
+                run_unit_time ();
+                continue;
+            }
+            // run next job
+            set_priority (processes[list_entry].pid, PRIORITY_HIGH);
+        }
+
+        run_unit_time ();
+        ++current_running_count;
+
+        // finish running
+        if (current_running_count == processes[list_entry].remain) {
+            static int status;
+            waitpid (processes[list_entry].pid, &status, 0);
+            // printf ("child %d finished.\n", processes[que_front].pid);
+            current_running_count = 0;
+            ++finish_child_count;
+
+            // remove list_entry from list
+            if (next[list_entry] == list_entry) list_entry = -1;
+            else {
+                int _n = next[list_entry], _p = prev[list_entry];
+                next[_p] = _n;
+                prev[_n] = _p;
+                list_entry = _n;
+            }
+        }
+        // achieve time quantum
+        else if (current_running_count == RR_QUANTUM) {
+            processes[list_entry].remain -= RR_QUANTUM;
+            list_entry = next[list_entry];
+            current_running_count = 0;
+            // printf ("switch to %d\n", list_entry);
+        }
+    }
 }
 
 
 void SJF (int n_process, struct process *processes) {
-
+    
 }
 
 
