@@ -1,5 +1,5 @@
 all: main.c
-	gcc -Wall main.c -o main.out
+	gcc -Wall -Wno-unused-result -O3 main.c -o main.out
 
 clean:
 	rm -f main.out
