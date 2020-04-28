@@ -5,14 +5,17 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <sched.h>
+#include <signal.h>
 
 #define MAX_N_PROCESS 5000
 #define MAX_EXECTIME 10000000
 #define CPU_PARENT 0
 #define CPU_CHILD 1
 #define PRIORITY_HIGH 99
-#define PRIORITY_LOW 1
+#define PRIORITY_LOW 0
 #define RR_QUANTUM 500
+
+#define ERR_EXIT(x) do { perror (x); exit (EXIT_FAILURE); } while(0)
 
 struct process {
     char name[40];
@@ -21,6 +24,8 @@ struct process {
 };
 
 void run_unit_time () { volatile unsigned long i; for(i=0;i<1000000UL;i++); }
+void empty_handler (int sig) {}
+void dummy_child () { nice (-10); while (1); }
 
 void use_cpu (pid_t pid, int cpu_id);
 void set_priority (pid_t pid, int priority);
@@ -30,11 +35,27 @@ void RR   (int n_process, struct process *processes);
 void SJF  (int n_process, struct process *processes);
 void PSJF (int n_process, struct process *processes);
 
+sigset_t block_mask, wait_mask, old_mask;
+
 
 int main() {
     char sche_policy[10];
     int n_process;
     struct process processes[MAX_N_PROCESS];
+
+    // assign a dummy process to child cpu
+    pid_t dummy;
+    if ((dummy = fork()) < 0) ERR_EXIT ("fork error\n");
+    else if (dummy == 0) dummy_child ();
+    use_cpu (dummy, CPU_CHILD);
+
+    // set signal handler and block SIGUSR1
+    sigfillset (&wait_mask);
+    sigdelset (&wait_mask, SIGUSR1);
+    sigemptyset (&block_mask);
+    sigaddset (&block_mask, SIGUSR1);
+    if (sigprocmask (SIG_BLOCK, &block_mask, &old_mask) < 0) ERR_EXIT ("sigprocmask error\n");
+    if (signal (SIGUSR1, empty_handler) == SIG_ERR) ERR_EXIT ("signal error\n");
 
     // set scheduling priority of main process
     use_cpu (getpid(), CPU_PARENT);
@@ -72,30 +93,29 @@ void use_cpu (pid_t pid, int cpu_id) {
     cpu_set_t mask;
     CPU_ZERO (&mask);
     CPU_SET (cpu_id, &mask);
-    if (sched_setaffinity ((pid), sizeof (mask), &mask) != 0){
-        perror ("sched_setaffinity error\n");
-        exit (EXIT_FAILURE);
-    }
+    if (sched_setaffinity ((pid), sizeof (mask), &mask) != 0) ERR_EXIT ("sched_setaffinity error\n");
 }
 
 
 void set_priority (pid_t pid, int priority) {
     struct sched_param param;
 	param.sched_priority = priority;
-    if (sched_setscheduler (pid, SCHED_FIFO, &param) != 0) {
-        perror ("sched_setscheduler error\n");
-        exit (EXIT_FAILURE);
-    }
+    int policy = (priority == PRIORITY_LOW) ? SCHED_IDLE : SCHED_FIFO;
+    if (sched_setscheduler (pid, policy, &param) != 0) ERR_EXIT ("sched_setscheduler error\n");
 }
 
 
 void run_child (struct process *child_process) {
+    sigsuspend (&wait_mask);
     printf ("%s %d\n", child_process->name, child_process->pid);
 
     // run
     long start_sec, start_nsec;
     syscall (333, &start_sec, &start_nsec);
-    for (int i = 0; i < child_process->exect; ++i) run_unit_time ();
+    for (int i = 0; i < child_process->exect; ++i){
+        run_unit_time ();
+        // if (i % 1000 == 0) puts (child_process->name);
+    }
     long end_sec, end_nsec;
     syscall (333, &end_sec, &end_nsec);
 
@@ -103,7 +123,7 @@ void run_child (struct process *child_process) {
     char buf[100];
     sprintf (buf, "[Project1] %d %ld.%09ld %ld.%09ld\n", child_process->pid, start_sec, start_nsec, end_sec, end_nsec);
     syscall (334, buf);
-    // printf ("%s", buf);
+    // printf ("%s %s", child_process->name, buf);
 
     exit (EXIT_SUCCESS);
 }
@@ -116,18 +136,15 @@ void FIFO (int n_process, struct process *processes) {
     for (int t = 0, finish_child_count = 0; finish_child_count < n_process; ++t) {
         while (que_end != n_process && processes[que_end].ready <= t) {
             pid_t pid = (processes[que_end].pid = fork());
-            if (pid < 0) {
-                perror ("fork error\n");
-                exit (EXIT_FAILURE);
-            }
+            if (pid < 0) ERR_EXIT ("fork error\n");
             else if (pid == 0) {
                 // child
                 pid = (processes[que_end].pid = getpid());
-                use_cpu (pid, CPU_CHILD);
-                set_priority (pid, PRIORITY_LOW);
                 run_child (&(processes[que_end]));
             }
             // parent
+            use_cpu (pid, CPU_CHILD);
+            set_priority (pid, PRIORITY_LOW);
             ++que_end;
         }
 
@@ -139,7 +156,9 @@ void FIFO (int n_process, struct process *processes) {
                 continue;
             }
             // run next job
+            // printf ("run %s\n", processes[que_front].name);
             set_priority (processes[que_front].pid, PRIORITY_HIGH);
+            kill (processes[que_front].pid, SIGUSR1);
         }
 
         run_unit_time ();
@@ -176,19 +195,16 @@ void RR (int n_process, struct process *processes) {
             }
 
             pid_t pid = (processes[next_entering_job].pid = fork());
-            if (pid < 0) {
-                perror ("fork error\n");
-                exit (EXIT_FAILURE);
-            }
+            if (pid < 0) ERR_EXIT ("fork error\n");
             else if (pid == 0) {
                 // child
                 pid = (processes[next_entering_job].pid = getpid());
-                use_cpu (pid, CPU_CHILD);
-                set_priority (pid, PRIORITY_LOW);
                 run_child (&(processes[next_entering_job]));
             }
             // parent
             // printf ("insert %d\n", next_entering_job);
+            use_cpu (pid, CPU_CHILD);
+            set_priority (pid, PRIORITY_LOW);
             ++next_entering_job;
         }
 
@@ -200,7 +216,9 @@ void RR (int n_process, struct process *processes) {
                 continue;
             }
             // run next job
+            // printf ("run %s\n", processes[list_entry].name);
             set_priority (processes[list_entry].pid, PRIORITY_HIGH);
+            if (processes[list_entry].remain == processes[list_entry].exect) kill (processes[list_entry].pid, SIGUSR1);
         }
 
         run_unit_time ();
@@ -210,7 +228,7 @@ void RR (int n_process, struct process *processes) {
         if (current_running_count == processes[list_entry].remain) {
             static int status;
             waitpid (processes[list_entry].pid, &status, 0);
-            // printf ("child %d finished.\n", processes[que_front].pid);
+            // printf ("child %d finished.\n", processes[list_entry].pid);
             current_running_count = 0;
             ++finish_child_count;
 
@@ -226,6 +244,7 @@ void RR (int n_process, struct process *processes) {
         // achieve time quantum
         else if (current_running_count == RR_QUANTUM) {
             processes[list_entry].remain -= RR_QUANTUM;
+            set_priority (processes[list_entry].pid, PRIORITY_LOW);
             list_entry = next[list_entry];
             current_running_count = 0;
             // printf ("switch to %d\n", list_entry);
@@ -254,19 +273,16 @@ void SJF (int n_process, struct process *processes) {
             }
 
             pid_t pid = (processes[next_entering_job].pid = fork());
-            if (pid < 0) {
-                perror ("fork error\n");
-                exit (EXIT_FAILURE);
-            }
+            if (pid < 0) ERR_EXIT ("fork error\n");
             else if (pid == 0) {
                 // child
                 pid = (processes[next_entering_job].pid = getpid());
-                use_cpu (pid, CPU_CHILD);
-                set_priority (pid, PRIORITY_LOW);
                 run_child (&(processes[next_entering_job]));
             }
             // parent
             // printf ("insert %d\n", next_entering_job);
+            use_cpu (pid, CPU_CHILD);
+            set_priority (pid, PRIORITY_LOW);
             ++next_entering_job;
         }
 
@@ -289,6 +305,7 @@ void SJF (int n_process, struct process *processes) {
             // run next job
             // printf ("run %d\n", processes[current_job].pid);
             set_priority (processes[current_job].pid, PRIORITY_HIGH);
+            kill (processes[current_job].pid, SIGUSR1);
         }
 
         run_unit_time ();
@@ -328,19 +345,16 @@ void PSJF (int n_process, struct process *processes) {
             }
 
             pid_t pid = (processes[next_entering_job].pid = fork());
-            if (pid < 0) {
-                perror ("fork error\n");
-                exit (EXIT_FAILURE);
-            }
+            if (pid < 0) ERR_EXIT ("fork error\n");
             else if (pid == 0) {
                 // child
                 pid = (processes[next_entering_job].pid = getpid());
-                use_cpu (pid, CPU_CHILD);
-                set_priority (pid, PRIORITY_LOW);
                 run_child (&(processes[next_entering_job]));
             }
             // parent
             // printf ("insert %d\n", next_entering_job);
+            use_cpu (pid, CPU_CHILD);
+            set_priority (pid, PRIORITY_LOW);
             ++next_entering_job;
         }
 
@@ -349,19 +363,27 @@ void PSJF (int n_process, struct process *processes) {
             run_unit_time ();
             continue;
         }
-
+        
         if (preempt) {
             processes[current_job].remain -= current_running_count;
             current_running_count = 0;
         }
         // if no job is running or preempt
         if (current_job == -1 || preempt) {
+            // printf ("switch job, preempt = %d\n", preempt);
             // find next job
+            int next_job = -1;
             for (int current = pool_entry, min_remain = MAX_EXECTIME; current != -1; current = next[current])
-                if (processes[current].remain <= min_remain) min_remain = processes[(current_job = current)].remain;
+                if (processes[current].remain <= min_remain) min_remain = processes[(next_job = current)].remain;
+            
+            // stop previous job
+            if (current_job != -1) set_priority (processes[current_job].pid, PRIORITY_LOW);
+
             // run next job
-            // printf ("run %d\n", processes[current_job].pid);
-            set_priority (processes[current_job].pid, PRIORITY_HIGH);
+            // printf ("run %s\n", processes[next_job].name);
+            set_priority (processes[next_job].pid, PRIORITY_HIGH);
+            current_job = next_job;
+            if (processes[current_job].remain == processes[current_job].exect) kill (processes[current_job].pid, SIGUSR1);
         }
 
         run_unit_time ();

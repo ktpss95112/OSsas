@@ -2,13 +2,12 @@
 
 mkdir -p output
 
-for full_path in testcases/*.txt ; do
-    IFS='/' read -ra tmp <<< "$full_path"
-    IFS='.txt' read -ra tmp2 <<< "${tmp[1]}"
-    file="${tmp2[0]}"
+for full_path in OS_PJ1_Test/*.txt ; do
+    file=`basename -s .txt "${full_path}"`
     echo -n "running ${file} ... "
+    
     sudo dmesg -C
-    sudo ./main.out < "testcases/${file}.txt" > "output/${file}_stdout.txt"
+    sudo ./main.out < "OS_PJ1_Test/${file}.txt" > "output/${file}_stdout.txt"
     dmesg | grep Project1 > "output/${file}_dmesg.txt"
     echo "done."
 done
