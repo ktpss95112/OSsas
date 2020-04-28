@@ -20,7 +20,6 @@ struct process {
     pid_t pid;
 };
 
-int compar (const void *a, const void *b) { return ((struct process*)a)->ready - ((struct process*)b)->ready; }
 void run_unit_time () { volatile unsigned long i; for(i=0;i<1000000UL;i++); }
 
 void use_cpu (pid_t pid, int cpu_id);
@@ -48,7 +47,6 @@ int main() {
         processes[i].pid = 0;
         processes[i].remain = processes[i].exect;
     }
-    qsort (processes, n_process, sizeof (struct process), compar);
 
     // select scheduling policy
     switch (sche_policy[0]) {
